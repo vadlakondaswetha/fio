@@ -2872,6 +2872,16 @@ struct fio_option fio_options[FIO_MAX_OPTS] = {
 		.group	= FIO_OPT_G_RANDOM,
 	},
 	{
+		.name	= "random_sequence_stride",
+		.lname	= "Random Sequence Stride",
+		.type	= FIO_OPT_BOOL,
+		.off1	= offsetof(struct thread_options, random_sequence_stride),
+		.help	= "Stride sequence of blocks for random distribution",
+		.def	= "0",
+		.category = FIO_OPT_C_IO,
+		.group	= FIO_OPT_G_RANDOM,
+	},
+	{
 		.name	= "percentage_random",
 		.lname	= "Percentage Random",
 		.type	= FIO_OPT_INT,

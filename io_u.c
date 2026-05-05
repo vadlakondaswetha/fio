@@ -303,7 +303,13 @@ static int __get_next_rand_offset_sequence(struct thread_data *td,
 
 	io_count = td->io_issues[ddir];
 	idx = io_count % td->o.random_sequence_nr;
-	*b = td->o.random_sequence[idx];
+	
+	if (td->o.random_sequence_stride) {
+		uint64_t group_idx = io_count / td->o.random_sequence_nr;
+		*b = group_idx * td->o.random_sequence_nr + td->o.random_sequence[idx];
+	} else {
+		*b = td->o.random_sequence[idx];
+	}
 	return 0;
 }
 

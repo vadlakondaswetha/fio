@@ -8,6 +8,15 @@ static pthread_mutex_t py_init_mutex = PTHREAD_MUTEX_INITIALIZER;
 static int py_initialized = 0;
 static PyThreadState *main_thread_state = NULL;
 
+typedef struct {
+	PyObject *file_obj;
+	PyObject *readinto_method;
+	PyObject *read_fallback_method;
+	PyObject *write_method;
+	PyObject *seek_method;
+	int seekable;
+} PyFile;
+
 int py_adapter_init(void) {
 	pthread_mutex_lock(&py_init_mutex);
 	if (!py_initialized) {
@@ -23,7 +32,7 @@ int py_adapter_init(void) {
 }
 
 void py_adapter_cleanup(void) {
-	/* No-op. We let OS cleanup Python on exit to avoid thread teardown issues. */
+	/* No-op. */
 }
 
 PyFsHandle py_adapter_create_filesystem(const char *protocol, const char *storage_options) {
@@ -99,6 +108,9 @@ PyFileHandle py_adapter_open_file(PyFsHandle fs, const char *path, const char *m
 	PyObject *py_mode = NULL;
 	PyObject *args = NULL;
 	PyObject *file_obj = NULL;
+	PyFile *py_file = NULL;
+	PyObject *seekable_method = NULL;
+	PyObject *seekable_res = NULL;
 
 	open_method = PyObject_GetAttrString((PyObject*)fs, "open");
 	py_filename = PyUnicode_FromString(path);
@@ -113,26 +125,76 @@ PyFileHandle py_adapter_open_file(PyFsHandle fs, const char *path, const char *m
 	if (!file_obj) {
 		log_err("fsspec: failed to open file '%s' with mode '%s'\n", path, mode);
 		PyErr_Print();
+		PyGILState_Release(gstate);
+		return NULL;
+	}
+
+	py_file = calloc(1, sizeof(PyFile));
+	if (!py_file) {
+		Py_DECREF(file_obj);
+		PyGILState_Release(gstate);
+		return NULL;
+	}
+
+	py_file->file_obj = file_obj;
+	
+	/* Cache methods to avoid attribute lookup on every I/O */
+	py_file->readinto_method = PyObject_GetAttrString(file_obj, "readinto");
+	if (!py_file->readinto_method) {
+		PyErr_Clear();
+	}
+	py_file->read_fallback_method = PyObject_GetAttrString(file_obj, "read");
+	if (!py_file->read_fallback_method) {
+		PyErr_Clear();
+	}
+	py_file->write_method = PyObject_GetAttrString(file_obj, "write");
+	if (!py_file->write_method) {
+		PyErr_Clear();
+	}
+	py_file->seek_method = PyObject_GetAttrString(file_obj, "seek");
+	if (!py_file->seek_method) {
+		PyErr_Clear();
+	}
+
+	/* Cache seekable status */
+	seekable_method = PyObject_GetAttrString(file_obj, "seekable");
+	if (seekable_method) {
+		seekable_res = PyObject_CallObject(seekable_method, NULL);
+		if (seekable_res) {
+			py_file->seekable = PyObject_IsTrue(seekable_res);
+			Py_DECREF(seekable_res);
+		} else {
+			PyErr_Clear();
+			py_file->seekable = 1;
+		}
+		Py_DECREF(seekable_method);
+	} else {
+		PyErr_Clear();
+		py_file->seekable = 1;
 	}
 
 	PyGILState_Release(gstate);
-	return (PyFileHandle)file_obj;
+	return (PyFileHandle)py_file;
 }
 
 int py_adapter_close_file(PyFileHandle file) {
 	PyGILState_STATE gstate = PyGILState_Ensure();
-	PyObject *close_method = NULL;
+	PyFile *py_file = (PyFile*)file;
 	PyObject *res = NULL;
 	int ret = 0;
 
-	close_method = PyObject_GetAttrString((PyObject*)file, "close");
-	res = PyObject_CallObject(close_method, NULL);
-	if (!res) {
-		PyErr_Print();
-		ret = -1;
+	if (py_file && py_file->file_obj) {
+		PyObject *close_method = PyObject_GetAttrString(py_file->file_obj, "close");
+		if (close_method) {
+			res = PyObject_CallObject(close_method, NULL);
+			if (!res) {
+				PyErr_Print();
+				ret = -1;
+			}
+			Py_XDECREF(res);
+			Py_DECREF(close_method);
+		}
 	}
-	Py_XDECREF(res);
-	Py_DECREF(close_method);
 
 	PyGILState_Release(gstate);
 	return ret;
@@ -141,47 +203,37 @@ int py_adapter_close_file(PyFileHandle file) {
 void py_adapter_free_file(PyFileHandle file) {
 	if (file) {
 		PyGILState_STATE gstate = PyGILState_Ensure();
-		Py_DECREF((PyObject*)file);
+		PyFile *py_file = (PyFile*)file;
+		Py_XDECREF(py_file->readinto_method);
+		Py_XDECREF(py_file->read_fallback_method);
+		Py_XDECREF(py_file->write_method);
+		Py_XDECREF(py_file->seek_method);
+		Py_XDECREF(py_file->file_obj);
+		free(py_file);
 		PyGILState_Release(gstate);
 	}
 }
 
 long long py_adapter_seek(PyFileHandle file, long long offset) {
 	PyGILState_STATE gstate = PyGILState_Ensure();
-  PyObject *seekable_method = NULL;
-	PyObject *seekable_res = NULL;
-	int seekable = 0;
-	PyObject *seek_method = NULL;
+	PyFile *py_file = (PyFile*)file;
 	PyObject *py_offset = NULL;
-	PyObject *args = NULL;
 	PyObject *res = NULL;
 	long long ret = 0;
 
-	/* Check if the file object is seekable (GCS/S3 write streams are NOT seekable) */
-  seekable_method = PyObject_GetAttrString((PyObject*)file, "seekable");
-  if (seekable_method) {
-  	seekable_res = PyObject_CallObject(seekable_method, NULL);
-  	if (seekable_res) {
-  		seekable = PyObject_IsTrue(seekable_res);
-  		Py_DECREF(seekable_res);
-  	}
-  	Py_DECREF(seekable_method);
-  } else {
-  	PyErr_Clear();
-  	seekable = 1; /* Fallback to trying seek if no seekable() method is present */
-  }
-  if (!seekable) {
-  	PyGILState_Release(gstate);
-  	return offset; /* Pretend the seek succeeded for unseekable streams (e.g. GCS write) */
-  }
+	if (!py_file->seekable) {
+		PyGILState_Release(gstate);
+		return offset;
+	}
 
-	seek_method = PyObject_GetAttrString((PyObject*)file, "seek");
+	if (!py_file->seek_method) {
+		PyGILState_Release(gstate);
+		return -1;
+	}
+
 	py_offset = PyLong_FromUnsignedLongLong(offset);
-	args = PyTuple_Pack(1, py_offset);
-	res = PyObject_CallObject(seek_method, args);
+	res = PyObject_CallFunctionObjArgs(py_file->seek_method, py_offset, NULL);
 	Py_DECREF(py_offset);
-	Py_DECREF(args);
-	Py_DECREF(seek_method);
 
 	if (!res) {
 		PyErr_Print();
@@ -199,20 +251,18 @@ long long py_adapter_seek(PyFileHandle file, long long offset) {
 	return ret;
 }
 
-static long py_adapter_read_fallback(PyFileHandle file, char *buf, long len) {
-	PyObject *read_method = NULL;
+static long py_adapter_read_fallback(PyFile *py_file, char *buf, long len) {
 	PyObject *py_len = NULL;
-	PyObject *args = NULL;
 	PyObject *data = NULL;
 	long ret = -1;
 
-	read_method = PyObject_GetAttrString((PyObject*)file, "read");
+	if (!py_file->read_fallback_method) {
+		return -1;
+	}
+
 	py_len = PyLong_FromUnsignedLong(len);
-	args = PyTuple_Pack(1, py_len);
-	data = PyObject_CallObject(read_method, args);
+	data = PyObject_CallFunctionObjArgs(py_file->read_fallback_method, py_len, NULL);
 	Py_DECREF(py_len);
-	Py_DECREF(args);
-	Py_DECREF(read_method);
 
 	if (!data) {
 		PyErr_Print();
@@ -230,39 +280,42 @@ static long py_adapter_read_fallback(PyFileHandle file, char *buf, long len) {
 	return ret;
 }
 
-long py_adapter_read(PyFileHandle file, char *buf, long len) {
+long py_adapter_read(PyFileHandle file, char *buf, long len, void *memview) {
 	PyGILState_STATE gstate = PyGILState_Ensure();
-	PyObject *readinto_method = NULL;
-	PyObject *py_memview = NULL;
-	PyObject *args = NULL;
+	PyFile *py_file = (PyFile*)file;
+	PyObject *py_memview = (PyObject*)memview;
 	PyObject *bytes_read = NULL;
 	long ret = -1;
+	int free_memview = 0;
 
-	readinto_method = PyObject_GetAttrString((PyObject*)file, "readinto");
-	if (!readinto_method) {
-		PyErr_Clear();
-		ret = py_adapter_read_fallback(file, buf, len);
+	if (!py_file->readinto_method) {
+		ret = py_adapter_read_fallback(py_file, buf, len);
 		PyGILState_Release(gstate);
 		return ret;
 	}
 
-	/* Create a writable memoryview wrapping our C buffer (zero-copy) */
-	py_memview = PyMemoryView_FromMemory(buf, len, PyBUF_WRITE);
+	/* Use pre-allocated memoryview if provided, otherwise allocate a temporary one */
 	if (!py_memview) {
-		PyErr_Print();
-		Py_DECREF(readinto_method);
-		PyGILState_Release(gstate);
-		return -1;
+		py_memview = PyMemoryView_FromMemory(buf, len, PyBUF_WRITE);
+		if (!py_memview) {
+			PyErr_Print();
+			PyGILState_Release(gstate);
+			return -1;
+		}
+		free_memview = 1;
 	}
 
-	args = PyTuple_Pack(1, py_memview);
-	bytes_read = PyObject_CallObject(readinto_method, args);
-	Py_DECREF(args);
-	Py_DECREF(py_memview);
-	Py_DECREF(readinto_method);
+	/* Call using optimized CallFunctionObjArgs to avoid tuple allocation */
+	bytes_read = PyObject_CallFunctionObjArgs(py_file->readinto_method, py_memview, NULL);
+	
+	if (free_memview) {
+		Py_DECREF(py_memview);
+	}
 
 	if (!bytes_read) {
 		PyErr_Print();
+		/* Try fallback if readinto failed unexpectedly */
+		ret = py_adapter_read_fallback(py_file, buf, len);
 	} else {
 		ret = PyLong_AsLong(bytes_read);
 		Py_DECREF(bytes_read);
@@ -272,30 +325,34 @@ long py_adapter_read(PyFileHandle file, char *buf, long len) {
 	return ret;
 }
 
-long py_adapter_write(PyFileHandle file, const char *buf, long len) {
+long py_adapter_write(PyFileHandle file, const char *buf, long len, void *memview) {
 	PyGILState_STATE gstate = PyGILState_Ensure();
-	PyObject *write_method = NULL;
-	PyObject *py_memview = NULL;
-	PyObject *args = NULL;
+	PyFile *py_file = (PyFile*)file;
+	PyObject *py_memview = (PyObject*)memview;
 	PyObject *written = NULL;
 	long ret = -1;
+	int free_memview = 0;
 
-	write_method = PyObject_GetAttrString((PyObject*)file, "write");
-	
-	/* Create a read-only memoryview wrapping our C buffer (zero-copy) */
-	py_memview = PyMemoryView_FromMemory((char*)buf, len, PyBUF_READ);
-	if (!py_memview) {
-		PyErr_Print();
-		Py_DECREF(write_method);
+	if (!py_file->write_method) {
 		PyGILState_Release(gstate);
 		return -1;
 	}
 
-	args = PyTuple_Pack(1, py_memview);
-	written = PyObject_CallObject(write_method, args);
-	Py_DECREF(args);
-	Py_DECREF(py_memview);
-	Py_DECREF(write_method);
+	if (!py_memview) {
+		py_memview = PyMemoryView_FromMemory((char*)buf, len, PyBUF_READ);
+		if (!py_memview) {
+			PyErr_Print();
+			PyGILState_Release(gstate);
+			return -1;
+		}
+		free_memview = 1;
+	}
+
+	written = PyObject_CallFunctionObjArgs(py_file->write_method, py_memview, NULL);
+	
+	if (free_memview) {
+		Py_DECREF(py_memview);
+	}
 
 	if (!written) {
 		PyErr_Print();
@@ -306,4 +363,22 @@ long py_adapter_write(PyFileHandle file, const char *buf, long len) {
 
 	PyGILState_Release(gstate);
 	return ret;
+}
+
+void* py_adapter_create_memoryview(char *buf, long len) {
+	PyGILState_STATE gstate = PyGILState_Ensure();
+	PyObject *memview = PyMemoryView_FromMemory(buf, len, PyBUF_WRITE);
+	if (!memview) {
+		PyErr_Print();
+	}
+	PyGILState_Release(gstate);
+	return (void*)memview;
+}
+
+void py_adapter_free_memoryview(void *memview) {
+	if (memview) {
+		PyGILState_STATE gstate = PyGILState_Ensure();
+		Py_DECREF((PyObject*)memview);
+		PyGILState_Release(gstate);
+	}
 }

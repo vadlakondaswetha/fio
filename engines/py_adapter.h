@@ -15,7 +15,10 @@ int py_adapter_close_file(PyFileHandle file);
 void py_adapter_free_file(PyFileHandle file);
 
 long long py_adapter_seek(PyFileHandle file, long long offset);
-long py_adapter_read(PyFileHandle file, char *buf, long len);
-long py_adapter_write(PyFileHandle file, const char *buf, long len);
+long py_adapter_read(PyFileHandle file, char *buf, long len, void *memview);
+long py_adapter_write(PyFileHandle file, const char *buf, long len, void *memview);
+
+void* py_adapter_create_memoryview(char *buf, long len);
+void py_adapter_free_memoryview(void *memview);
 
 #endif

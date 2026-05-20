@@ -135,6 +135,18 @@ static void fio_fsspec_cleanup(struct thread_data *td) {
 	py_adapter_cleanup();
 }
 
+static int fio_fsspec_io_u_init(struct thread_data *td, struct io_u *io_u) {
+	io_u->engine_data = py_adapter_create_memoryview(io_u->xfer_buf, io_u->xfer_buflen);
+	return io_u->engine_data ? 0 : 1;
+}
+
+static void fio_fsspec_io_u_free(struct thread_data *td, struct io_u *io_u) {
+	if (io_u->engine_data) {
+		py_adapter_free_memoryview(io_u->engine_data);
+		io_u->engine_data = NULL;
+	}
+}
+
 static enum fio_q_status fio_fsspec_queue(struct thread_data *td,
 					 struct io_u *io_u)
 {
@@ -149,14 +161,14 @@ static enum fio_q_status fio_fsspec_queue(struct thread_data *td,
 	}
 
 	if (io_u->ddir == DDIR_READ) {
-		long r = py_adapter_read(file_obj, io_u->xfer_buf, io_u->xfer_buflen);
+		long r = py_adapter_read(file_obj, io_u->xfer_buf, io_u->xfer_buflen, io_u->engine_data);
 		if (r < 0) {
 			io_u->error = EIO;
 		} else {
 			io_u->resid = io_u->xfer_buflen - r;
 		}
 	} else if (io_u->ddir == DDIR_WRITE) {
-		long w = py_adapter_write(file_obj, io_u->xfer_buf, io_u->xfer_buflen);
+		long w = py_adapter_write(file_obj, io_u->xfer_buf, io_u->xfer_buflen, io_u->engine_data);
 		if (w < 0) {
 			io_u->error = EIO;
 		} else {
@@ -190,6 +202,8 @@ FIO_STATIC struct ioengine_ops ioengine = {
 	.cleanup		= fio_fsspec_cleanup,
 	.open_file		= fio_fsspec_open,
 	.close_file		= fio_fsspec_close,
+	.io_u_init		= fio_fsspec_io_u_init,
+	.io_u_free		= fio_fsspec_io_u_free,
 	.options		= options,
 	.option_struct_size	= sizeof(struct fsspec_options),
 };

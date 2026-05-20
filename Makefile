@@ -145,6 +145,12 @@ ifdef CONFIG_HTTP
   http_LIBS = -lcurl -lssl -lcrypto
   ENGINES += http
 endif
+ifdef CONFIG_FSSPEC
+  fsspec_SRCS = engines/fsspec.c engines/py_adapter.c
+  fsspec_LIBS = $(FSSPEC_LIBS)
+  fsspec_CFLAGS = $(FSSPEC_CFLAGS)
+  ENGINES += fsspec
+endif
 ifdef CONFIG_DFS
   dfs_SRCS = engines/dfs.c
   dfs_LIBS = -luuid -ldaos -ldfs

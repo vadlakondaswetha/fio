@@ -195,6 +195,7 @@ isal64=""
 libblkio=""
 libzbc=""
 dfs=""
+fsspec=""
 seed_buckets=""
 dynamic_engines="no"
 prefix=/usr/local
@@ -283,6 +284,10 @@ for opt do
   ;;
   --disable-dfs) dfs="no"
   ;;
+  --disable-fsspec) disable_fsspec="yes"
+  ;;
+  --enable-fsspec) enable_fsspec="yes"
+  ;;
   --enable-asan) asan="yes"
   ;;
   --seed-buckets=*) seed_buckets="$optarg"
@@ -338,6 +343,8 @@ if test "$show_help" = "yes" ; then
   echo "--disable-tcmalloc      Disable tcmalloc support"
   echo "--dynamic-libengines    Lib-based ioengines as dynamic libraries"
   echo "--disable-dfs           Disable DAOS File System support even if found"
+  echo "--disable-fsspec        Disable fsspec support"
+  echo "--enable-fsspec         Enable fsspec support"
   echo "--enable-asan           Enable address sanitizer"
   echo "--seed-buckets=         Number of seed buckets for the refill-buffer"
   echo "--disable-tls		Disable __thread local storage"
@@ -1927,6 +1934,73 @@ fi
 print_config "http engine" "$http"
 
 ##########################################
+# check for fsspec
+if test "$disable_fsspec" = "yes" ; then
+  fsspec="no"
+elif test "$enable_fsspec" = "yes" ; then
+  fsspec="yes"
+fi
+
+if test "$fsspec" != "no" ; then
+  if has python3; then
+    if python3 -c "import fsspec" >/dev/null 2>&1; then
+      fsspec="yes"
+    else
+      if test "$enable_fsspec" = "yes" ; then
+        fatal "fsspec requested but python fsspec package not found"
+      fi
+      fsspec="no"
+    fi
+  else
+    if test "$enable_fsspec" = "yes" ; then
+      fatal "fsspec requested but python3 not found"
+    fi
+    fsspec="no"
+  fi
+fi
+
+if test "$fsspec" = "yes" ; then
+  if has python3-config; then
+    # Use python3-config to get embeddable flags if available (Python 3.8+)
+    if python3-config --cflags --embed >/dev/null 2>&1; then
+      FSSPEC_CFLAGS=$(python3-config --cflags --embed)
+    else
+      FSSPEC_CFLAGS=$(python3-config --cflags)
+    fi
+    if python3-config --ldflags --embed >/dev/null 2>&1; then
+      FSSPEC_LIBS=$(python3-config --ldflags --embed)
+    else
+      FSSPEC_LIBS=$(python3-config --ldflags)
+    fi
+    
+    # Test compilation
+    cat > $TMPC << EOF
+#include <Python.h>
+int main(void)
+{
+  Py_Initialize();
+  Py_Finalize();
+  return 0;
+}
+EOF
+    if compile_prog "$FSSPEC_CFLAGS" "$FSSPEC_LIBS" "fsspec python check"; then
+      fsspec="yes"
+    else
+      if test "$enable_fsspec" = "yes" ; then
+        fatal "fsspec requested but failed to compile test program with python C API"
+      fi
+      fsspec="no"
+    fi
+  else
+    if test "$enable_fsspec" = "yes" ; then
+      fatal "fsspec requested but python3-config not found"
+    fi
+    fsspec="no"
+  fi
+fi
+print_config "fsspec engine" "$fsspec"
+
+##########################################
 # check for rados
 if test "$rados" != "yes" ; then
   rados="no"
@@ -3259,6 +3333,11 @@ if test "$vsock" = "yes"; then
 fi
 if test "$http" = "yes" ; then
   output_sym "CONFIG_HTTP"
+fi
+if test "$fsspec" = "yes" ; then
+  output_sym "CONFIG_FSSPEC"
+  echo "FSSPEC_CFLAGS=$FSSPEC_CFLAGS" >> $config_host_mak
+  echo "FSSPEC_LIBS=$FSSPEC_LIBS" >> $config_host_mak
 fi
 if test "$rados" = "yes" ; then
   output_sym "CONFIG_RADOS"

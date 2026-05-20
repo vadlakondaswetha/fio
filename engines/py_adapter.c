@@ -148,11 +148,54 @@ void py_adapter_free_file(PyFileHandle file) {
 
 long long py_adapter_seek(PyFileHandle file, long long offset) {
 	PyGILState_STATE gstate = PyGILState_Ensure();
+  PyObject *seekable_method = NULL;
+	PyObject *seekable_res = NULL;
+	int seekable = 0;
+	PyObject *seekable_method = NULL;
+	PyObject *seekable_res = NULL;
+	int seekable = 0;
 	PyObject *seek_method = NULL;
 	PyObject *py_offset = NULL;
 	PyObject *args = NULL;
 	PyObject *res = NULL;
 	long long ret = 0;
+
+	/* Check if the file object is seekable (GCS/S3 write streams are NOT seekable) */
+  	seekable_method = PyObject_GetAttrString((PyObject*)file, "seekable");
+  	if (seekable_method) {
+  		seekable_res = PyObject_CallObject(seekable_method, NULL);
+  		if (seekable_res) {
+  			seekable = PyObject_IsTrue(seekable_res);
+  			Py_DECREF(seekable_res);
+  		}
+  		Py_DECREF(seekable_method);
+  	} else {
+  		PyErr_Clear();
+  		seekable = 1; /* Fallback to trying seek if no seekable() method is present */
+  	}
+  	if (!seekable) {
+  		PyGILState_Release(gstate);
+  		return offset; /* Pretend the seek succeeded for unseekable streams (e.g. GCS write) */
+  	}
+
+	/* Check if the file object is seekable (GCS/S3 write streams are NOT seekable) */
+	seekable_method = PyObject_GetAttrString((PyObject*)file, "seekable");
+	if (seekable_method) {
+		seekable_res = PyObject_CallObject(seekable_method, NULL);
+		if (seekable_res) {
+			seekable = PyObject_IsTrue(seekable_res);
+			Py_DECREF(seekable_res);
+		}
+		Py_DECREF(seekable_method);
+	} else {
+		PyErr_Clear();
+		seekable = 1; /* Fallback to trying seek if no seekable() method is present */
+	}
+
+	if (!seekable) {
+		PyGILState_Release(gstate);
+		return offset; /* Pretend the seek succeeded for unseekable streams (e.g. GCS write) */
+	}
 
 	seek_method = PyObject_GetAttrString((PyObject*)file, "seek");
 	py_offset = PyLong_FromUnsignedLongLong(offset);

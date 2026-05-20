@@ -151,9 +151,6 @@ long long py_adapter_seek(PyFileHandle file, long long offset) {
   PyObject *seekable_method = NULL;
 	PyObject *seekable_res = NULL;
 	int seekable = 0;
-	PyObject *seekable_method = NULL;
-	PyObject *seekable_res = NULL;
-	int seekable = 0;
 	PyObject *seek_method = NULL;
 	PyObject *py_offset = NULL;
 	PyObject *args = NULL;

@@ -382,3 +382,56 @@ void py_adapter_free_memoryview(void *memview) {
 		PyGILState_Release(gstate);
 	}
 }
+
+long long py_adapter_get_file_size(PyFsHandle fs, const char *path) {
+	PyGILState_STATE gstate = PyGILState_Ensure();
+	PyObject *size_method = NULL;
+	PyObject *py_filename = NULL;
+	PyObject *args = NULL;
+	PyObject *res = NULL;
+	PyObject *info_method = NULL;
+	PyObject *info_dict = NULL;
+	long long ret = -1;
+
+	size_method = PyObject_GetAttrString((PyObject*)fs, "size");
+	if (!size_method) {
+		PyErr_Clear();
+		info_method = PyObject_GetAttrString((PyObject*)fs, "info");
+		if (info_method) {
+			py_filename = PyUnicode_FromString(path);
+			args = PyTuple_Pack(1, py_filename);
+			info_dict = PyObject_CallObject(info_method, args);
+			Py_DECREF(py_filename);
+			Py_DECREF(args);
+			Py_DECREF(info_method);
+			if (info_dict && PyDict_Check(info_dict)) {
+				PyObject *py_size = PyDict_GetItemString(info_dict, "size");
+				if (py_size) {
+					ret = PyLong_AsLongLong(py_size);
+				}
+				Py_DECREF(info_dict);
+			} else {
+				PyErr_Print();
+			}
+		} else {
+			PyErr_Print();
+		}
+	} else {
+		py_filename = PyUnicode_FromString(path);
+		args = PyTuple_Pack(1, py_filename);
+		res = PyObject_CallObject(size_method, args);
+		Py_DECREF(py_filename);
+		Py_DECREF(args);
+		Py_DECREF(size_method);
+
+		if (!res) {
+			PyErr_Print();
+		} else {
+			ret = PyLong_AsLongLong(res);
+			Py_DECREF(res);
+		}
+	}
+
+	PyGILState_Release(gstate);
+	return ret;
+}

@@ -21,4 +21,6 @@ long py_adapter_write(PyFileHandle file, const char *buf, long len, void *memvie
 void* py_adapter_create_memoryview(char *buf, long len);
 void py_adapter_free_memoryview(void *memview);
 
+long long py_adapter_get_file_size(PyFsHandle fs, const char *path);
+
 #endif

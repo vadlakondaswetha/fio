@@ -9,10 +9,16 @@
 #include <unistd.h>
 #include <errno.h>
 #include <assert.h>
+#include <pthread.h>
 
 #include "../fio.h"
 #include "../optgroup.h"
 #include "py_adapter.h"
+
+/* Global shared filesystem handles for thread mode (thread=1) */
+static PyFsHandle global_fs = NULL;
+static pthread_mutex_t global_fs_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int global_fs_ref_count = 0;
 
 struct fsspec_data {
 	PyFsHandle fs;
@@ -69,7 +75,23 @@ static int fio_fsspec_init(struct thread_data *td) {
 		return 1;
 	}
 
-	sd->fs = py_adapter_create_filesystem(o->protocol, o->storage_options);
+	/* 
+	 * Thread-Safe Shared Filesystem Initialization:
+	 * If thread=1 is used, only the first thread creates the filesystem instance.
+	 * All subsequent threads in the same process reuse the shared 'global_fs'.
+	 * If thread=0 (process mode) is used, fork happened before init, so each child 
+	 * process starts with global_fs = NULL and naturally creates its own instance.
+	 */
+	pthread_mutex_lock(&global_fs_mutex);
+	if (!global_fs) {
+		global_fs = py_adapter_create_filesystem(o->protocol, o->storage_options);
+	}
+	if (global_fs) {
+		sd->fs = global_fs;
+		global_fs_ref_count++;
+	}
+	pthread_mutex_unlock(&global_fs_mutex);
+
 	if (!sd->fs) {
 		free(sd);
 		return 1;
@@ -77,7 +99,13 @@ static int fio_fsspec_init(struct thread_data *td) {
 
 	sd->file_objs = calloc(td->o.nr_files, sizeof(PyFileHandle));
 	if (!sd->file_objs) {
-		py_adapter_free_filesystem(sd->fs);
+		pthread_mutex_lock(&global_fs_mutex);
+		global_fs_ref_count--;
+		if (global_fs_ref_count == 0) {
+			py_adapter_free_filesystem(global_fs);
+			global_fs = NULL;
+		}
+		pthread_mutex_unlock(&global_fs_mutex);
 		free(sd);
 		return 1;
 	}
@@ -132,9 +160,18 @@ static void fio_fsspec_cleanup(struct thread_data *td) {
 			}
 		}
 		free(sd->file_objs);
-		if (sd->fs) {
-			py_adapter_free_filesystem(sd->fs);
+		
+		/* Thread-safe release of the shared filesystem instance */
+		pthread_mutex_lock(&global_fs_mutex);
+		global_fs_ref_count--;
+		if (global_fs_ref_count == 0) {
+			if (global_fs) {
+				py_adapter_free_filesystem(global_fs);
+				global_fs = NULL;
+			}
 		}
+		pthread_mutex_unlock(&global_fs_mutex);
+
 		free(sd);
 		td->io_ops_data = NULL;
 	}
@@ -159,6 +196,32 @@ static void fio_fsspec_io_u_free(struct thread_data *td, struct io_u *io_u) {
 		free(iud);
 		io_u->engine_data = NULL;
 	}
+}
+
+static int fio_fsspec_get_file_size(struct thread_data *td, struct fio_file *f) {
+	struct fsspec_options *o = td->eo;
+	PyFsHandle fs;
+	long long size = -1;
+
+	if (py_adapter_init()) {
+		return 1;
+	}
+
+	fs = py_adapter_create_filesystem(o->protocol, o->storage_options);
+	if (!fs) {
+		return 1;
+	}
+
+	size = py_adapter_get_file_size(fs, f->file_name);
+	
+	py_adapter_free_filesystem(fs);
+	
+	if (size < 0) {
+		return 1;
+	}
+
+	f->real_file_size = size;
+	return 0;
 }
 
 static enum fio_q_status fio_fsspec_queue(struct thread_data *td,
@@ -227,6 +290,7 @@ FIO_STATIC struct ioengine_ops ioengine = {
 	.cleanup		= fio_fsspec_cleanup,
 	.open_file		= fio_fsspec_open,
 	.close_file		= fio_fsspec_close,
+	.get_file_size	= fio_fsspec_get_file_size,
 	.io_u_init		= fio_fsspec_io_u_init,
 	.io_u_free		= fio_fsspec_io_u_free,
 	.options		= options,

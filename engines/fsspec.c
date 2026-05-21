@@ -118,6 +118,7 @@ static int fio_fsspec_open(struct thread_data *td, struct fio_file *f) {
 	struct fsspec_data *sd = td->io_ops_data;
 	const char *mode = "rb";
 	PyFileHandle file_obj;
+	long long size = -1;
 
 	if (td_write(td)) {
 		mode = "wb";
@@ -133,6 +134,17 @@ static int fio_fsspec_open(struct thread_data *td, struct fio_file *f) {
 
 	sd->file_objs[f->fileno] = file_obj;
 	f->fd = f->fileno; 
+
+	/* 
+	 * Safe GCS File Size Detection (After Fork):
+	 * By querying the file size inside the open_file hook (which runs in the child process context),
+	 * we completely avoid executing any GCS/gRPC code in the master process before fork,
+	 * eliminating the 'skipping fork() handlers' gRPC deadlock entirely.
+	 */
+	size = py_adapter_get_file_size(sd->fs, f->file_name);
+	if (size >= 0) {
+		f->real_file_size = size;
+	}
 
 	return 0;
 }
@@ -196,32 +208,6 @@ static void fio_fsspec_io_u_free(struct thread_data *td, struct io_u *io_u) {
 		free(iud);
 		io_u->engine_data = NULL;
 	}
-}
-
-static int fio_fsspec_get_file_size(struct thread_data *td, struct fio_file *f) {
-	struct fsspec_options *o = td->eo;
-	PyFsHandle fs;
-	long long size = -1;
-
-	if (py_adapter_init()) {
-		return 1;
-	}
-
-	fs = py_adapter_create_filesystem(o->protocol, o->storage_options);
-	if (!fs) {
-		return 1;
-	}
-
-	size = py_adapter_get_file_size(fs, f->file_name);
-	
-	py_adapter_free_filesystem(fs);
-	
-	if (size < 0) {
-		return 1;
-	}
-
-	f->real_file_size = size;
-	return 0;
 }
 
 static enum fio_q_status fio_fsspec_queue(struct thread_data *td,
@@ -290,7 +276,6 @@ FIO_STATIC struct ioengine_ops ioengine = {
 	.cleanup		= fio_fsspec_cleanup,
 	.open_file		= fio_fsspec_open,
 	.close_file		= fio_fsspec_close,
-	.get_file_size	= fio_fsspec_get_file_size,
 	.io_u_init		= fio_fsspec_io_u_init,
 	.io_u_free		= fio_fsspec_io_u_free,
 	.options		= options,

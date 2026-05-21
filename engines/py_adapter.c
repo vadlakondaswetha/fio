@@ -23,6 +23,7 @@ int py_adapter_init(void) {
 		/* Set high-performance tuning environment variables for GCSFS */
 		setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true", 1);
 		setenv("DEFAULT_GCSFS_CONCURRENCY", "4", 1);
+		setenv("GCSFS_EXPERIMENTAL_ZB_HNS_SUPPORT", "true", 1);
 
 		Py_Initialize();
 #if PY_VERSION_HEX < 0x03090000
@@ -68,7 +69,15 @@ PyFsHandle py_adapter_create_filesystem(const char *protocol, const char *storag
 				PyObject *py_val;
 
 				*eq = '\0';
-				py_val = PyUnicode_FromString(val);
+				if (strcasecmp(val, "true") == 0) {
+					py_val = Py_True;
+					Py_INCREF(Py_True);
+				} else if (strcasecmp(val, "false") == 0) {
+					py_val = Py_False;
+					Py_INCREF(Py_False);
+				} else {
+					py_val = PyUnicode_FromString(val);
+				}
 				PyDict_SetItemString(kwargs, key, py_val);
 				Py_DECREF(py_val);
 			}

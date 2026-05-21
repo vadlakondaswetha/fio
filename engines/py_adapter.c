@@ -20,6 +20,10 @@ typedef struct {
 int py_adapter_init(void) {
 	pthread_mutex_lock(&py_init_mutex);
 	if (!py_initialized) {
+		/* Set high-performance tuning environment variables for GCSFS */
+		setenv("USE_EXPERIMENTAL_ADAPTIVE_PREFETCHING", "true", 1);
+		setenv("DEFAULT_GCSFS_CONCURRENCY", "4", 1);
+
 		Py_Initialize();
 #if PY_VERSION_HEX < 0x03090000
 		PyEval_InitThreads();
